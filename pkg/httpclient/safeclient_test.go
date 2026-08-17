@@ -15,7 +15,9 @@ func TestNewAllowPrivateIPsClientReachesLoopback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	response, err := NewAllowPrivateIPsClient(time.Second).Get(server.URL)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	response, err := NewAllowPrivateIPsClient(time.Second).Do(request)
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusNoContent, response.StatusCode)
@@ -25,6 +27,11 @@ func TestNewSafeClientRejectsLoopback(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
 
-	_, err := NewSafeClient(time.Second, false).Get(server.URL)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	response, err := NewSafeClient(time.Second, false).Do(request)
+	if response != nil {
+		defer response.Body.Close()
+	}
 	require.Error(t, err)
 }

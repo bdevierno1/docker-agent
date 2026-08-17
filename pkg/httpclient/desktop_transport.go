@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
@@ -75,12 +76,7 @@ func (t *desktopAwareTransport) proxySafe(ctx context.Context, host string) bool
 		// A PAC proxy can resolve names unavailable to the local resolver.
 		return true
 	}
-	for _, ip := range ips {
-		if IsPublicIP(ip) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(ips, IsPublicIP)
 }
 
 func desktopProxyDisabled() bool {
