@@ -5,8 +5,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"slices"
-	"sync"
 
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
@@ -14,12 +12,12 @@ import (
 const disableDesktopProxyEnv = "CAGENT_DISABLE_DESKTOP_PROXY"
 
 type desktopAwareTransport struct {
-	direct   *http.Transport
-	guarded  bool
-	resolver func(context.Context, string) ([]net.IP, error)
+	direct              *http.Transport
+	guarded             bool
+	resolver            func(context.Context, string) ([]net.IP, error)
+	newDesktopTransport func(context.Context, http.RoundTripper) http.RoundTripper
 
-	once      sync.Once
-	desktopRT http.RoundTripper
+	disableCompression bool
 }
 
 func newDesktopAwareTransport(guarded bool) http.RoundTripper {
@@ -35,6 +33,7 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 		resolver: func(ctx context.Context, host string) ([]net.IP, error) {
 			return net.DefaultResolver.LookupIP(ctx, "ip", host)
 		},
+		newDesktopTransport: desktoptransport.NewWithDirectTransport,
 	}
 }
 
@@ -61,10 +60,13 @@ func (t *desktopAwareTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if desktopProxyDisabled() || isLoopbackHost(req.URL.Hostname()) || (t.guarded && !t.proxySafe(req.Context(), req.URL.Hostname())) {
 		return t.direct.RoundTrip(req)
 	}
-	t.once.Do(func() {
-		t.desktopRT = desktoptransport.NewWithDirectTransport(req.Context(), t.direct)
-	})
-	return t.desktopRT.RoundTrip(req)
+	desktopRT := t.newDesktopTransport(req.Context(), t.direct)
+	if t.disableCompression {
+		if disabler, ok := desktopRT.(interface{ DisableCompression() }); ok {
+			disabler.DisableCompression()
+		}
+	}
+	return desktopRT.RoundTrip(req)
 }
 
 func (t *desktopAwareTransport) proxySafe(ctx context.Context, host string) bool {
@@ -76,7 +78,15 @@ func (t *desktopAwareTransport) proxySafe(ctx context.Context, host string) bool
 		// A PAC proxy can resolve names unavailable to the local resolver.
 		return true
 	}
-	return slices.ContainsFunc(ips, IsPublicIP)
+	if len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !IsPublicIP(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func desktopProxyDisabled() bool {
@@ -92,8 +102,6 @@ func isLoopbackHost(host string) bool {
 }
 
 func (t *desktopAwareTransport) DisableCompression() {
+	t.disableCompression = true
 	t.direct.DisableCompression = true
-	if disabler, ok := t.desktopRT.(interface{ DisableCompression() }); ok {
-		disabler.DisableCompression()
-	}
 }

@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/desktop"
@@ -19,7 +21,13 @@ import (
 	"github.com/docker/docker-agent/pkg/memoize"
 )
 
-var memoizer = memoize.New[bool](1 * time.Minute)
+var (
+	memoizer       = memoize.New[bool](1 * time.Minute)
+	detectionMu    sync.Mutex
+	desktopRunning = func(ctx context.Context) (bool, error) {
+		return desktop.IsDockerDesktopRunning(context.WithoutCancel(ctx)), nil
+	}
+)
 
 // New returns an HTTP transport that uses the Docker Desktop proxy
 // if available, and falls back to direct connections while re-probing the
@@ -31,6 +39,9 @@ func New(ctx context.Context) http.RoundTripper {
 // NewWithDirectTransport is like New but uses direct as its direct fallback.
 // A nil direct clones http.DefaultTransport.
 func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.RoundTripper {
+	detectionMu.Lock()
+	defer detectionMu.Unlock()
+
 	var transport *http.Transport
 	if directTransport, ok := direct.(*http.Transport); ok {
 		transport = directTransport
@@ -41,10 +52,7 @@ func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.
 	}
 
 	desktopRunning, err := memoizer.Memoize("desktopRunning", func() (bool, error) {
-		// Memoized once per process: detach the first caller's cancellation
-		// (so a cancelled caller can't poison the cached result) while keeping
-		// its trace context.
-		return desktop.IsDockerDesktopRunning(context.WithoutCancel(ctx)), nil
+		return desktopRunning(ctx)
 	})
 	if err != nil {
 		return transport
@@ -65,6 +73,23 @@ func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.
 	}
 
 	return transport
+}
+
+// SetDesktopRunningForTest replaces Docker Desktop detection until cleanup.
+// It is intended for deterministic transport tests outside this package.
+func SetDesktopRunningForTest(tb testing.TB, detect func(context.Context) (bool, error)) {
+	tb.Helper()
+	detectionMu.Lock()
+	previous := desktopRunning
+	desktopRunning = detect
+	memoizer = memoize.New[bool](0)
+	detectionMu.Unlock()
+	tb.Cleanup(func() {
+		detectionMu.Lock()
+		defer detectionMu.Unlock()
+		desktopRunning = previous
+		memoizer = memoize.New[bool](1 * time.Minute)
+	})
 }
 
 // Bounded backoff: one probe per cooldown, not per request.

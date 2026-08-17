@@ -113,7 +113,7 @@ toolsets:
 
 ### Docker Desktop proxy
 
-When Docker Desktop is running, URL-loaded agent configurations and built-in HTTP toolsets use its PAC proxy for public destinations. Docker Desktop is optional: if it is unavailable, requests retain their normal direct or environment-proxy behavior. Loopback requests always stay direct, and SSRF-safe clients do not proxy destinations that resolve only to non-public addresses.
+When Docker Desktop is running, URL-loaded agent configurations and built-in HTTP toolsets use its PAC proxy for public destinations. Docker Desktop is optional: if it is unavailable, requests retain their normal direct or environment-proxy behavior. Loopback requests always stay direct. Guarded clients use the PAC proxy only when local DNS returns one or more addresses and every address is public. A DNS lookup failure may be delegated to the proxy; any locally resolved non-public address stays on the SSRF-protected direct path.
 
 Set `CAGENT_DISABLE_DESKTOP_PROXY=1` to bypass Docker Desktop's PAC proxy temporarily when diagnosing egress problems. This does not disable SSRF protection; use the tool's documented `allow_private_ips: true` option only for trusted internal services.
 
