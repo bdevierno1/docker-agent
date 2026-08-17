@@ -29,7 +29,7 @@ func NewSafeClient(timeout time.Duration, unsafe bool) *http.Client {
 	}
 	return &http.Client{
 		Timeout:       timeout,
-		Transport:     NewSSRFSafeTransport(),
+		Transport:     NewDesktopAwareSSRFSafeTransport(),
 		CheckRedirect: BoundedRedirects(10),
 	}
 }

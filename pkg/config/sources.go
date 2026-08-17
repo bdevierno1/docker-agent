@@ -336,7 +336,7 @@ func (a urlSource) Read(ctx context.Context) ([]byte, error) {
 		} else {
 			client = &http.Client{
 				Timeout:       60 * time.Second,
-				Transport:     httpclient.NewSSRFSafeTransport(),
+				Transport:     httpclient.NewDesktopAwareSSRFSafeTransport(),
 				CheckRedirect: httpclient.HTTPSOnlyRedirects(10),
 			}
 		}

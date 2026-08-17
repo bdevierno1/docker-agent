@@ -25,11 +25,20 @@ var memoizer = memoize.New[bool](1 * time.Minute)
 // if available, and falls back to direct connections while re-probing the
 // proxy after a cooldown so long-lived processes recover on their own.
 func New(ctx context.Context) http.RoundTripper {
-	t, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return http.DefaultTransport
+	return NewWithDirectTransport(ctx, nil)
+}
+
+// NewWithDirectTransport is like New but uses direct as its direct fallback.
+// A nil direct clones http.DefaultTransport.
+func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.RoundTripper {
+	var transport *http.Transport
+	if directTransport, ok := direct.(*http.Transport); ok {
+		transport = directTransport
+	} else if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	}
-	transport := t.Clone()
 
 	desktopRunning, err := memoizer.Memoize("desktopRunning", func() (bool, error) {
 		// Memoized once per process: detach the first caller's cancellation
@@ -42,7 +51,7 @@ func New(ctx context.Context) http.RoundTripper {
 	}
 	if desktopRunning {
 		// Create a proxy transport
-		proxyTransport := t.Clone()
+		proxyTransport := transport.Clone()
 		proxyTransport.Proxy = http.ProxyURL(&url.URL{
 			Scheme: "http",
 		})
