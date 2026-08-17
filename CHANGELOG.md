@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Bug Fixes
+
+- Routes URL sources and configured HTTP tool egress through Docker Desktop's PAC proxy when available while preserving SSRF protections. Set `CAGENT_DISABLE_DESKTOP_PROXY=1` to bypass the Desktop proxy for troubleshooting; loopback traffic remains direct.
+
 
 ## [v1.126.0] - 2026-08-18
 
