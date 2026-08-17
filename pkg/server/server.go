@@ -184,6 +184,7 @@ func (s *Server) sessionsReady(c echo.Context) error {
 }
 
 func (s *Server) getAgents(c echo.Context) error {
+	// A failing source must not hide healthy agents from callers.
 	agents := []api.Agent{}
 	for k, agentSource := range s.sm.Sources {
 		slog.Debug("API source", "source", agentSource.Name())
@@ -248,7 +249,7 @@ func (s *Server) getAgentConfig(c echo.Context) error {
 		cfg, err := config.Load(c.Request().Context(), agentSource)
 		if err != nil {
 			slog.Error("Failed to load config from API source", "key", k, "error", err)
-			continue
+			return echo.NewHTTPError(http.StatusBadGateway, fmt.Sprintf("failed to load agent source %q: %v", k, err))
 		}
 
 		return c.JSON(http.StatusOK, cfg)

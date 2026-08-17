@@ -13,6 +13,19 @@ import (
 // this value uniformly affects every HTTP-based built-in tool.
 const DefaultToolHTTPTimeout = 30 * time.Second
 
+// NewAllowPrivateIPsClient returns an HTTP client for explicit
+// allow_private_ips opt-ins. It can reach private addresses directly, but uses
+// Docker Desktop's PAC proxy when available; loopback is always direct. Docker
+// Desktop remains optional and CAGENT_DISABLE_DESKTOP_PROXY=1 restores the
+// default environment-proxy/direct behavior.
+func NewAllowPrivateIPsClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		Transport:     newAllowPrivateIPsTransport(),
+		CheckRedirect: BoundedRedirects(10),
+	}
+}
+
 // NewSafeClient returns the HTTP client used by built-in tools that issue
 // outbound calls to URLs the operator (or a fetched OpenAPI spec) supplies.
 //

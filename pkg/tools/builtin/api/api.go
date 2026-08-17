@@ -39,7 +39,10 @@ func (t *ToolSet) callTool(ctx context.Context, toolCall tools.ToolCall, _ tools
 	endpoint := t.expander.Expand(ctx, t.config.Endpoint, nil)
 	headers := t.expander.ExpandMap(ctx, t.config.Headers)
 
-	client := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs)
+	client := httpclient.NewSafeClient(t.timeout, false)
+	if t.allowPrivateIPs {
+		client = httpclient.NewAllowPrivateIPsClient(t.timeout)
+	}
 
 	var reqBody io.Reader = http.NoBody
 	switch t.config.Method {

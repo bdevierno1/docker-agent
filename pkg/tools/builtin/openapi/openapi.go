@@ -123,7 +123,11 @@ func (t *ToolSet) fetchSpec(ctx context.Context) (*v3.Document, error) {
 	req.Header.Set("Accept", "application/json")
 	setHeaders(req, t.headers)
 
-	resp, err := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs).Do(req)
+	client := httpclient.NewSafeClient(t.timeout, false)
+	if t.allowPrivateIPs {
+		client = httpclient.NewAllowPrivateIPsClient(t.timeout)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -482,7 +486,11 @@ func (h *openAPIHandler) callTool(ctx context.Context, params openAPICallArgs) (
 	headers := h.expander.ExpandMap(ctx, h.headers)
 	setHeaders(req, headers)
 
-	resp, err := httpclient.NewSafeClient(h.timeout, h.allowPrivateIPs).Do(req)
+	client := httpclient.NewSafeClient(h.timeout, false)
+	if h.allowPrivateIPs {
+		client = httpclient.NewAllowPrivateIPsClient(h.timeout)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
