@@ -194,7 +194,13 @@ func TestDesktopAwareTransportConsultsDesktopDetectionPerRequest(t *testing.T) {
 }
 
 func TestDesktopAwareTransportDisableCompressionBeforeDesktopTransport(t *testing.T) {
+	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) { return true, nil })
+
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
+	transport.direct = &http.Transport{}
+	transport.direct.RegisterProtocol("https", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
+	}))
 	transport.DisableCompression()
 	proxy := &compressionTransport{}
 	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper { return proxy }

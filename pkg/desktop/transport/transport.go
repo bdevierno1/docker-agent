@@ -27,6 +27,7 @@ var (
 	desktopRunning = func(ctx context.Context) (bool, error) {
 		return desktop.IsDockerDesktopRunning(context.WithoutCancel(ctx)), nil
 	}
+	desktopRunningOverride func(context.Context) (bool, error)
 )
 
 // New returns an HTTP transport that uses the Docker Desktop proxy
@@ -51,6 +52,9 @@ func DesktopRunning(ctx context.Context) (bool, error) {
 	detectionMu.Lock()
 	defer detectionMu.Unlock()
 
+	if desktopRunningOverride != nil {
+		return desktopRunningOverride(ctx)
+	}
 	return memoizer.Memoize("desktopRunning", func() (bool, error) {
 		return desktopRunning(ctx)
 	})
@@ -84,20 +88,18 @@ func directTransport(direct http.RoundTripper) http.RoundTripper {
 	return http.DefaultTransport
 }
 
-// SetDesktopRunningForTest replaces Docker Desktop detection until cleanup.
+// SetDesktopRunningForTest overrides memoized Docker Desktop detection until cleanup.
 // It is intended for deterministic transport tests outside this package.
 func SetDesktopRunningForTest(tb testing.TB, detect func(context.Context) (bool, error)) {
 	tb.Helper()
 	detectionMu.Lock()
-	previous := desktopRunning
-	desktopRunning = detect
-	memoizer = memoize.New[bool](time.Nanosecond)
+	previous := desktopRunningOverride
+	desktopRunningOverride = detect
 	detectionMu.Unlock()
 	tb.Cleanup(func() {
 		detectionMu.Lock()
 		defer detectionMu.Unlock()
-		desktopRunning = previous
-		memoizer = memoize.New[bool](1 * time.Minute)
+		desktopRunningOverride = previous
 	})
 }
 
