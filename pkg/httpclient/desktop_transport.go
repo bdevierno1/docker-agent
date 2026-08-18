@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
@@ -17,6 +18,10 @@ type desktopAwareTransport struct {
 	resolver            func(context.Context, string) ([]net.IP, error)
 	newDesktopTransport func(context.Context, http.RoundTripper) http.RoundTripper
 
+	mu                 sync.Mutex
+	desktopTransport   http.RoundTripper
+	desktopDetected    bool
+	detectionObserved  bool
 	disableCompression bool
 }
 
@@ -33,7 +38,9 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 		resolver: func(ctx context.Context, host string) ([]net.IP, error) {
 			return net.DefaultResolver.LookupIP(ctx, "ip", host)
 		},
-		newDesktopTransport: desktoptransport.NewWithDirectTransport,
+		newDesktopTransport: func(_ context.Context, direct http.RoundTripper) http.RoundTripper {
+			return desktoptransport.NewDesktopTransport(direct)
+		},
 	}
 }
 
@@ -60,13 +67,34 @@ func (t *desktopAwareTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if desktopProxyDisabled() || isLoopbackHost(req.URL.Hostname()) || (t.guarded && !t.proxySafe(req.Context(), req.URL.Hostname())) {
 		return t.direct.RoundTrip(req)
 	}
-	desktopRT := t.newDesktopTransport(req.Context(), t.direct)
-	if t.disableCompression {
-		if disabler, ok := desktopRT.(interface{ DisableCompression() }); ok {
-			disabler.DisableCompression()
+
+	desktopRunning, err := desktoptransport.DesktopRunning(req.Context())
+	if err != nil {
+		desktopRunning = false
+	}
+	return t.transportForDesktopState(req.Context(), desktopRunning).RoundTrip(req)
+}
+
+func (t *desktopAwareTransport) transportForDesktopState(ctx context.Context, desktopRunning bool) http.RoundTripper {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if !t.detectionObserved || t.desktopDetected != desktopRunning {
+		t.detectionObserved = true
+		t.desktopDetected = desktopRunning
+		if desktopRunning {
+			t.desktopTransport = t.newDesktopTransport(ctx, t.direct)
+			if t.disableCompression {
+				if disabler, ok := t.desktopTransport.(interface{ DisableCompression() }); ok {
+					disabler.DisableCompression()
+				}
+			}
 		}
 	}
-	return desktopRT.RoundTrip(req)
+	if desktopRunning {
+		return t.desktopTransport
+	}
+	return t.direct
 }
 
 func (t *desktopAwareTransport) proxySafe(ctx context.Context, host string) bool {
@@ -102,6 +130,12 @@ func isLoopbackHost(host string) bool {
 }
 
 func (t *desktopAwareTransport) DisableCompression() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	t.disableCompression = true
 	t.direct.DisableCompression = true
+	if disabler, ok := t.desktopTransport.(interface{ DisableCompression() }); ok {
+		disabler.DisableCompression()
+	}
 }

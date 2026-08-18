@@ -39,40 +39,44 @@ func New(ctx context.Context) http.RoundTripper {
 // NewWithDirectTransport is like New but uses direct as its direct fallback.
 // A nil direct clones http.DefaultTransport.
 func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.RoundTripper {
+	if running, err := DesktopRunning(ctx); err == nil && running {
+		return NewDesktopTransport(direct)
+	}
+	return directTransport(direct)
+}
+
+// DesktopRunning reports the memoized Docker Desktop availability state.
+func DesktopRunning(ctx context.Context) (bool, error) {
 	detectionMu.Lock()
 	defer detectionMu.Unlock()
 
-	var transport *http.Transport
-	if directTransport, ok := direct.(*http.Transport); ok {
-		transport = directTransport
-	} else if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport = defaultTransport.Clone()
-	} else {
-		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
-	}
-
-	desktopRunning, err := memoizer.Memoize("desktopRunning", func() (bool, error) {
+	return memoizer.Memoize("desktopRunning", func() (bool, error) {
 		return desktopRunning(ctx)
 	})
-	if err != nil {
+}
+
+// NewDesktopTransport returns a Docker Desktop proxy transport with direct fallback.
+// A nil direct clones http.DefaultTransport.
+func NewDesktopTransport(direct http.RoundTripper) http.RoundTripper {
+	transport := directTransport(direct)
+	proxyTransport := transport.Clone()
+	proxyTransport.Proxy = http.ProxyURL(&url.URL{
+		Scheme: "http",
+	})
+	proxyTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return socket.DialUnix(ctx, desktop.Paths().ProxySocket)
+	}
+	return newFallbackTransport(proxyTransport, transport)
+}
+
+func directTransport(direct http.RoundTripper) *http.Transport {
+	if transport, ok := direct.(*http.Transport); ok {
 		return transport
 	}
-	if desktopRunning {
-		// Create a proxy transport
-		proxyTransport := transport.Clone()
-		proxyTransport.Proxy = http.ProxyURL(&url.URL{
-			Scheme: "http",
-		})
-		// Override the dialer to connect to the Unix socket for the proxy
-		proxyTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return socket.DialUnix(ctx, desktop.Paths().ProxySocket)
-		}
-
-		// Return a fallback transport that tries the proxy first, then falls back to direct
-		return newFallbackTransport(proxyTransport, transport)
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		return transport.Clone()
 	}
-
-	return transport
+	return &http.Transport{Proxy: http.ProxyFromEnvironment}
 }
 
 // SetDesktopRunningForTest replaces Docker Desktop detection until cleanup.
@@ -82,7 +86,7 @@ func SetDesktopRunningForTest(tb testing.TB, detect func(context.Context) (bool,
 	detectionMu.Lock()
 	previous := desktopRunning
 	desktopRunning = detect
-	memoizer = memoize.New[bool](0)
+	memoizer = memoize.New[bool](time.Nanosecond)
 	detectionMu.Unlock()
 	tb.Cleanup(func() {
 		detectionMu.Lock()

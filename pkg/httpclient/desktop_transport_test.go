@@ -89,24 +89,23 @@ func TestDesktopAwareTransportLoopbackIsNeverProxied(t *testing.T) {
 	assert.False(t, isLoopbackHost("example.com"))
 }
 
-func TestDesktopAwareTransportUsesDesktopTransportPerRequest(t *testing.T) {
+func TestDesktopAwareTransportCachesDesktopTransport(t *testing.T) {
+	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) { return true, nil })
+
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
-	var calls int
+	var factoryCalls int
+	branch := &countingTransport{}
 	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper {
-		calls++
-		return roundTripperFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
-		})
+		factoryCalls++
+		return branch
 	}
 
 	for range 2 {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com", http.NoBody)
-		require.NoError(t, err)
-		resp, err := transport.RoundTrip(req)
-		require.NoError(t, err)
+		resp := roundTrip(t, transport)
 		require.NoError(t, resp.Body.Close())
 	}
-	assert.Equal(t, 2, calls)
+	assert.Equal(t, 1, factoryCalls)
+	assert.Equal(t, 2, branch.calls)
 }
 
 func TestDesktopAwareTransportDisabledOrGuardedUsesDirect(t *testing.T) {
@@ -148,27 +147,47 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func TestDesktopAwareTransportConsultsDesktopDetectionPerRequest(t *testing.T) {
+	desktopRunning := false
 	var detections int
 	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) {
 		detections++
-		return false, nil
+		return desktopRunning, nil
 	})
 
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
-	assert.Zero(t, detections)
+	direct := &countingTransport{}
 	transport.direct = &http.Transport{}
-	transport.direct.RegisterProtocol("https", roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
-	}))
+	transport.direct.RegisterProtocol("https", direct)
+	var factoryCalls int
+	branch := &countingTransport{}
+	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper {
+		factoryCalls++
+		return branch
+	}
 
 	for range 2 {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com", http.NoBody)
-		require.NoError(t, err)
-		resp, err := transport.RoundTrip(req)
-		require.NoError(t, err)
+		resp := roundTrip(t, transport)
 		require.NoError(t, resp.Body.Close())
 	}
-	assert.Equal(t, 1, detections)
+	assert.Equal(t, 2, detections)
+	assert.Equal(t, 2, direct.calls)
+	assert.Zero(t, factoryCalls)
+
+	desktopRunning = true
+	for range 2 {
+		resp := roundTrip(t, transport)
+		require.NoError(t, resp.Body.Close())
+	}
+	assert.Equal(t, 4, detections)
+	assert.Equal(t, 1, factoryCalls)
+	assert.Equal(t, 2, branch.calls)
+
+	desktopRunning = false
+	resp := roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 5, detections)
+	assert.Equal(t, 1, factoryCalls)
+	assert.Equal(t, 3, direct.calls)
 }
 
 func TestDesktopAwareTransportDisableCompressionBeforeDesktopTransport(t *testing.T) {
@@ -196,6 +215,59 @@ func TestDesktopAwareTransportDisableCompressionBeforeAndAfterDirectFallback(t *
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://127.0.0.1", http.NoBody)
 	require.NoError(t, err)
 	assert.True(t, isLoopbackHost(req.URL.Hostname()))
+}
+
+func TestDesktopAwareTransportRetainsDesktopBranchCooldown(t *testing.T) {
+	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) { return true, nil })
+
+	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
+	branch := &cooldownTransport{}
+	var factoryCalls int
+	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper {
+		factoryCalls++
+		return branch
+	}
+
+	for range 2 {
+		resp := roundTrip(t, transport)
+		require.NoError(t, resp.Body.Close())
+	}
+	assert.Equal(t, 1, factoryCalls)
+	assert.Equal(t, 1, branch.proxyCalls)
+	assert.Equal(t, 2, branch.directCalls)
+}
+
+func roundTrip(t *testing.T, transport http.RoundTripper) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com", http.NoBody)
+	require.NoError(t, err)
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	return resp
+}
+
+type countingTransport struct {
+	calls int
+}
+
+func (t *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
+}
+
+type cooldownTransport struct {
+	proxyCalls  int
+	directCalls int
+	disabled    bool
+}
+
+func (t *cooldownTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	if !t.disabled {
+		t.proxyCalls++
+		t.disabled = true
+	}
+	t.directCalls++
+	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
 }
 
 type compressionTransport struct {
