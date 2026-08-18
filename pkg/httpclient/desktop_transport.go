@@ -3,11 +3,16 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
+
+	"golang.org/x/net/http/httpproxy"
 
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
@@ -21,9 +26,9 @@ type desktopAwareTransport struct {
 	newDesktopTransport func(context.Context, http.RoundTripper) http.RoundTripper
 
 	mu                 sync.Mutex
-	desktopOnce        sync.Once
 	desktopTransport   http.RoundTripper
 	disableCompression bool
+	warnedCompression  bool
 }
 
 func newDesktopAwareTransport(guarded bool) http.RoundTripper {
@@ -31,7 +36,7 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 	if guarded {
 		direct = NewSSRFSafeTransport()
 	} else {
-		direct = cloneDefaultTransport()
+		direct = cloneDefaultTransport(environmentProxyFunc())
 	}
 	return &desktopAwareTransport{
 		direct:  direct,
@@ -57,11 +62,20 @@ func newAllowPrivateIPsTransport() http.RoundTripper {
 	return newDesktopAwareTransport(false)
 }
 
-func cloneDefaultTransport() *http.Transport {
+func cloneDefaultTransport(proxy func(*http.Request) (*url.URL, error)) *http.Transport {
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		return base.Clone()
+		transport := base.Clone()
+		transport.Proxy = proxy
+		return transport
 	}
-	return &http.Transport{Proxy: http.ProxyFromEnvironment}
+	return &http.Transport{Proxy: proxy}
+}
+
+func environmentProxyFunc() func(*http.Request) (*url.URL, error) {
+	proxyForURL := httpproxy.FromEnvironment().ProxyFunc()
+	return func(req *http.Request) (*url.URL, error) {
+		return proxyForURL(req.URL)
+	}
 }
 
 func (t *desktopAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -81,16 +95,14 @@ func (t *desktopAwareTransport) selectedTransportFor(ctx context.Context) http.R
 	if err != nil || !running {
 		return t.direct
 	}
-	t.desktopOnce.Do(func() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.desktopTransport == nil {
 		t.desktopTransport = t.newDesktopTransport(ctx, t.direct)
-		t.mu.Lock()
-		defer t.mu.Unlock()
 		if t.disableCompression {
-			if disabler, ok := t.desktopTransport.(interface{ DisableCompression() }); ok {
-				disabler.DisableCompression()
-			}
+			disableCompression(t.desktopTransport)
 		}
-	})
+	}
 	return t.desktopTransport
 }
 
@@ -115,10 +127,14 @@ func (t *desktopAwareTransport) proxySafe(ctx context.Context, host string) bool
 }
 
 func desktopProxyDisabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(disableDesktopProxyEnv))) {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(disableDesktopProxyEnv)))
+	switch value {
+	case "", "0", "false", "no", "off":
+		return false
 	case "1", "true", "yes", "on":
 		return true
 	default:
+		slog.Warn("unrecognized DOCKER_AGENT_DISABLE_DESKTOP_PROXY value; treating it as disabled", "value", value)
 		return false
 	}
 }
@@ -137,8 +153,24 @@ func (t *desktopAwareTransport) DisableCompression() {
 	defer t.mu.Unlock()
 
 	t.disableCompression = true
-	t.direct.DisableCompression = true
-	if disabler, ok := t.desktopTransport.(interface{ DisableCompression() }); ok {
-		disabler.DisableCompression()
+	if !disableCompression(t.direct) && !t.warnedCompression {
+		t.warnedCompression = true
+		slog.Warn("cannot disable compression for custom direct transport", "transport", fmt.Sprintf("%T", t.direct))
 	}
+	disableCompression(t.desktopTransport)
+}
+
+func disableCompression(transport any) bool {
+	if transport == nil {
+		return true
+	}
+	if disabler, ok := transport.(interface{ DisableCompression() }); ok {
+		disabler.DisableCompression()
+		return true
+	}
+	if direct, ok := transport.(*http.Transport); ok {
+		direct.DisableCompression = true
+		return true
+	}
+	return false
 }

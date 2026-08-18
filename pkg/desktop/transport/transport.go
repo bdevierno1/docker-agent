@@ -13,22 +13,30 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/desktop"
 	socket "github.com/docker/docker-agent/pkg/desktop/socket"
-	"github.com/docker/docker-agent/pkg/memoize"
 )
 
 var (
-	memoizer       = memoize.New[bool](1 * time.Minute)
-	detectionMu    sync.Mutex
 	desktopRunning = func(ctx context.Context) (bool, error) {
 		return desktop.IsDockerDesktopRunning(context.WithoutCancel(ctx)), nil
 	}
-	desktopRunningOverride func(context.Context) (bool, error)
+	desktopRunningOverrideMu sync.RWMutex
+	desktopRunningOverride   func(context.Context) (bool, error)
+	desktopDetection         desktopDetectionCache
 )
+
+type desktopDetectionCache struct {
+	mu         sync.Mutex
+	value      bool
+	expires    time.Time
+	hasValue   bool
+	refreshing bool
+	ready      chan struct{}
+	err        error
+}
 
 // New returns an HTTP transport that uses the Docker Desktop proxy
 // if available, and falls back to direct connections while re-probing the
@@ -47,17 +55,84 @@ func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.
 	return transport
 }
 
-// DesktopRunning reports the memoized Docker Desktop availability state.
+// DesktopRunning reports Docker Desktop availability. It returns the most
+// recent value while an expired value is refreshed in the background.
 func DesktopRunning(ctx context.Context) (bool, error) {
-	detectionMu.Lock()
-	defer detectionMu.Unlock()
-
-	if desktopRunningOverride != nil {
-		return desktopRunningOverride(ctx)
+	desktopRunningOverrideMu.RLock()
+	override := desktopRunningOverride
+	desktopRunningOverrideMu.RUnlock()
+	if override != nil {
+		return override(ctx)
 	}
-	return memoizer.Memoize("desktopRunning", func() (bool, error) {
-		return desktopRunning(ctx)
-	})
+	return desktopDetection.running(ctx)
+}
+
+func (c *desktopDetectionCache) running(ctx context.Context) (bool, error) {
+	c.mu.Lock()
+	if c.hasValue {
+		value := c.value
+		if time.Now().Before(c.expires) || c.refreshing {
+			c.mu.Unlock()
+			return value, nil
+		}
+		c.refreshing = true
+		go c.refresh(context.WithoutCancel(ctx))
+		c.mu.Unlock()
+		return value, nil
+	}
+	if c.refreshing {
+		ready := c.ready
+		c.mu.Unlock()
+		select {
+		case <-ready:
+			return c.running(ctx)
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	c.refreshing = true
+	c.ready = make(chan struct{})
+	ready := c.ready
+	c.mu.Unlock()
+
+	c.refresh(context.WithoutCancel(ctx))
+	<-ready
+	c.mu.Lock()
+	err := c.err
+	c.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	return c.running(ctx)
+}
+
+func (c *desktopDetectionCache) refresh(ctx context.Context) {
+	value, err := desktopRunning(ctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.err = err
+	if err == nil {
+		c.value = value
+		c.hasValue = true
+		c.expires = time.Now().Add(time.Minute)
+	}
+	c.refreshing = false
+	if c.ready != nil {
+		close(c.ready)
+		c.ready = nil
+	}
+}
+
+func resetDesktopDetectionForTest() {
+	desktopDetection.mu.Lock()
+	defer desktopDetection.mu.Unlock()
+	desktopDetection.value = false
+	desktopDetection.expires = time.Time{}
+	desktopDetection.hasValue = false
+	desktopDetection.refreshing = false
+	desktopDetection.ready = nil
+	desktopDetection.err = nil
 }
 
 // NewDesktopTransport returns a Docker Desktop proxy transport with direct fallback.
@@ -88,45 +163,34 @@ func directTransport(direct http.RoundTripper) http.RoundTripper {
 	return http.DefaultTransport
 }
 
-// SetDesktopRunningForTest overrides memoized Docker Desktop detection until cleanup.
-// It is intended for deterministic transport tests outside this package.
-func SetDesktopRunningForTest(tb testing.TB, detect func(context.Context) (bool, error)) {
-	tb.Helper()
-	detectionMu.Lock()
+// SetDesktopRunningForTest overrides Docker Desktop detection and returns a
+// function that restores the previous detector.
+func SetDesktopRunningForTest(detect func(context.Context) (bool, error)) func() {
+	desktopRunningOverrideMu.Lock()
 	previous := desktopRunningOverride
 	desktopRunningOverride = detect
-	detectionMu.Unlock()
-	tb.Cleanup(func() {
-		detectionMu.Lock()
-		defer detectionMu.Unlock()
+	desktopRunningOverrideMu.Unlock()
+	return func() {
+		desktopRunningOverrideMu.Lock()
+		defer desktopRunningOverrideMu.Unlock()
 		desktopRunningOverride = previous
-	})
+	}
 }
 
 // Bounded backoff: one probe per cooldown, not per request.
 const proxyRetryCooldown = 30 * time.Second
 
-// fallbackTransport tries the proxy first, direct second. A socket error
-// disables the proxy for proxyRetryCooldown, so a stale error can't latch
-// the transport into direct mode for the rest of the process's lifetime.
 type fallbackTransport struct {
 	proxy  *http.Transport
 	direct *http.Transport
 
-	// Zero = enabled. Non-zero = disabled until this UnixNano deadline.
 	disabledUntilUnixNano atomic.Int64
 }
 
-// newFallbackTransport creates a transport that tries the proxy first, then falls back to direct.
 func newFallbackTransport(proxy, direct *http.Transport) *fallbackTransport {
-	return &fallbackTransport{
-		proxy:  proxy,
-		direct: direct,
-	}
+	return &fallbackTransport{proxy: proxy, direct: direct}
 }
 
-// DisableCompression disables automatic gzip compression on both transports.
-// This is needed for SSE streaming compatibility.
 func (f *fallbackTransport) DisableCompression() {
 	f.proxy.DisableCompression = true
 	f.direct.DisableCompression = true
@@ -140,7 +204,6 @@ func (f *fallbackTransport) proxyEnabled() bool {
 	if time.Now().UnixNano() < until {
 		return false
 	}
-	// CAS (not Store) so a concurrent disableProxy() can't be stomped.
 	f.disabledUntilUnixNano.CompareAndSwap(until, 0)
 	return true
 }
@@ -163,13 +226,8 @@ func (f *fallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	slog.Warn("Docker Desktop proxy unavailable, falling back to direct connection",
-		"error", err.Error(),
-		"url", req.URL.String(),
-		"retry_after", proxyRetryCooldown)
+		"error", err.Error(), "url", req.URL.String(), "retry_after", proxyRetryCooldown)
 	f.disableProxy()
-
-	// Retry direct only when the body is safe to replay; otherwise the
-	// proxy may have already consumed it.
 	if req.Body != nil && req.GetBody == nil {
 		return nil, err
 	}
@@ -184,32 +242,15 @@ func (f *fallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return f.direct.RoundTrip(retryReq)
 }
 
-// isProxySocketError checks if the error indicates the proxy socket is unavailable.
-// This includes:
-// - "no such file or directory" - socket file was deleted
-// - "connection refused" - socket exists but nothing is listening
-// - "dial unix" errors - general Unix socket connection failures
 func isProxySocketError(err error) bool {
 	if err == nil {
 		return false
 	}
-
 	errStr := strings.ToLower(err.Error())
-
-	// Check for common proxy socket failure patterns
-	proxyErrorPatterns := []string{
-		"no such file or directory",   // Socket file deleted
-		"connect: connection refused", // Socket exists but no listener
-		"proxyconnect tcp",            // Proxy connection failure
-		"dial unix",                   // Unix socket dial failure
-		"unix socket",                 // Generic Unix socket error
-	}
-
-	for _, pattern := range proxyErrorPatterns {
+	for _, pattern := range []string{"no such file or directory", "connect: connection refused", "proxyconnect tcp", "dial unix", "unix socket"} {
 		if strings.Contains(errStr, pattern) {
 			return true
 		}
 	}
-
 	return false
 }

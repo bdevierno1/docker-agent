@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -112,8 +113,62 @@ func TestDesktopAwareTransportLoopbackIsNeverProxied(t *testing.T) {
 	assert.False(t, isLoopbackHost("example.com"))
 }
 
+func TestDesktopAwareTransportEnvironmentProxyFallback(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://proxy.example:8080")
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:8443")
+	t.Setenv("NO_PROXY", "bypass.example,.internal.example")
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return false, nil }))
+
+	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
+	for _, test := range []struct {
+		host      string
+		wantProxy bool
+	}{
+		{host: "public.example", wantProxy: true},
+		{host: "bypass.example", wantProxy: false},
+		{host: "service.internal.example", wantProxy: false},
+	} {
+		t.Run(test.host, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+test.host, http.NoBody)
+			proxy, err := transport.direct.Proxy(req)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantProxy, proxy != nil)
+		})
+	}
+}
+
+func TestDesktopAwareTransportDesktopWinsUntilKillSwitch(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:8443")
+	t.Setenv("NO_PROXY", "public.example")
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return true, nil }))
+
+	transport := newDesktopAwareTransport(true).(*desktopAwareTransport)
+	transport.resolver = func(context.Context, string) ([]net.IP, error) { return []net.IP{net.ParseIP("1.1.1.1")}, nil }
+	desktop := &countingTransport{}
+	direct := &countingTransport{}
+	transport.direct.RegisterProtocol("https", direct)
+	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper { return desktop }
+
+	resp := roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 1, desktop.calls)
+	assert.Zero(t, direct.calls)
+
+	t.Setenv(disableDesktopProxyEnv, "1")
+	resp = roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 1, desktop.calls)
+	assert.Equal(t, 1, direct.calls)
+
+	t.Setenv(disableDesktopProxyEnv, "")
+	resp = roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 2, desktop.calls)
+	assert.Equal(t, 1, direct.calls)
+}
+
 func TestDesktopAwareTransportCachesDesktopTransport(t *testing.T) {
-	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) { return true, nil })
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return true, nil }))
 
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
 	var factoryCalls int
@@ -172,10 +227,10 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestDesktopAwareTransportConsultsDesktopDetectionPerRequest(t *testing.T) {
 	desktopRunning := false
 	var detections int
-	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) {
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) {
 		detections++
 		return desktopRunning, nil
-	})
+	}))
 
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
 	direct := &countingTransport{}
@@ -214,7 +269,7 @@ func TestDesktopAwareTransportConsultsDesktopDetectionPerRequest(t *testing.T) {
 }
 
 func TestDesktopAwareTransportDisableCompressionBeforeDesktopTransport(t *testing.T) {
-	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) { return true, nil })
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return true, nil }))
 
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
 	transport.direct = &http.Transport{}
@@ -225,11 +280,30 @@ func TestDesktopAwareTransportDisableCompressionBeforeDesktopTransport(t *testin
 	proxy := &compressionTransport{}
 	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper { return proxy }
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com", http.NoBody)
-	require.NoError(t, err)
-	resp, err := transport.RoundTrip(req)
-	require.NoError(t, err)
+	resp := roundTrip(t, transport)
 	require.NoError(t, resp.Body.Close())
+	assert.True(t, proxy.disabled)
+}
+
+func TestDesktopAwareTransportDisableCompressionConcurrentDesktopCreation(t *testing.T) {
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return true, nil }))
+
+	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
+	proxy := &compressionTransport{}
+	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper { return proxy }
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			transport.DisableCompression()
+		}
+	}()
+	for range 100 {
+		resp := roundTrip(t, transport)
+		require.NoError(t, resp.Body.Close())
+	}
+	<-done
 	assert.True(t, proxy.disabled)
 }
 
@@ -247,7 +321,7 @@ func TestDesktopAwareTransportDisableCompressionBeforeAndAfterDirectFallback(t *
 }
 
 func TestDesktopAwareTransportRetainsDesktopBranchCooldown(t *testing.T) {
-	desktoptransport.SetDesktopRunningForTest(t, func(context.Context) (bool, error) { return true, nil })
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return true, nil }))
 
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
 	branch := &cooldownTransport{}

@@ -13,24 +13,21 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/desktop"
-	"github.com/docker/docker-agent/pkg/memoize"
 )
 
 func TestDesktopRunningOverrideBypassesMemoizedDetection(t *testing.T) {
-	detectionMu.Lock()
-	previousMemoizer := memoizer
+	desktopRunningOverrideMu.Lock()
 	previousDesktopRunning := desktopRunning
-	previousOverride := desktopRunningOverride
-	memoizer = memoize.New[bool](time.Minute)
 	desktopRunning = func(context.Context) (bool, error) { return false, nil }
 	desktopRunningOverride = nil
-	detectionMu.Unlock()
+	desktopRunningOverrideMu.Unlock()
+	resetDesktopDetectionForTest()
 	t.Cleanup(func() {
-		detectionMu.Lock()
-		defer detectionMu.Unlock()
-		memoizer = previousMemoizer
+		desktopRunningOverrideMu.Lock()
 		desktopRunning = previousDesktopRunning
-		desktopRunningOverride = previousOverride
+		desktopRunningOverride = nil
+		desktopRunningOverrideMu.Unlock()
+		resetDesktopDetectionForTest()
 	})
 
 	running, err := DesktopRunning(t.Context())
@@ -38,10 +35,10 @@ func TestDesktopRunningOverrideBypassesMemoizedDetection(t *testing.T) {
 	assert.False(t, running)
 
 	calls := 0
-	SetDesktopRunningForTest(t, func(context.Context) (bool, error) {
+	t.Cleanup(SetDesktopRunningForTest(func(context.Context) (bool, error) {
 		calls++
 		return true, nil
-	})
+	}))
 
 	for range 2 {
 		running, err = DesktopRunning(t.Context())
@@ -49,6 +46,53 @@ func TestDesktopRunningOverrideBypassesMemoizedDetection(t *testing.T) {
 		assert.True(t, running)
 	}
 	assert.Equal(t, 2, calls)
+}
+
+func TestDesktopRunningRefreshesStaleValueWithoutBlocking(t *testing.T) {
+	refresh := make(chan struct{})
+	startedRefresh := make(chan struct{})
+	desktopRunningOverrideMu.Lock()
+	previous := desktopRunning
+	desktopRunning = func(context.Context) (bool, error) {
+		close(startedRefresh)
+		<-refresh
+		return true, nil
+	}
+	desktopRunningOverrideMu.Unlock()
+	resetDesktopDetectionForTest()
+	desktopDetection.mu.Lock()
+	desktopDetection.value = false
+	desktopDetection.hasValue = true
+	desktopDetection.expires = time.Now().Add(-time.Second)
+	desktopDetection.mu.Unlock()
+	t.Cleanup(func() {
+		close(refresh)
+		desktopRunningOverrideMu.Lock()
+		desktopRunning = previous
+		desktopRunningOverrideMu.Unlock()
+		resetDesktopDetectionForTest()
+	})
+
+	started := make(chan struct{})
+	go func() {
+		_, _ = DesktopRunning(t.Context())
+		close(started)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stale desktop detection blocked")
+	}
+
+	select {
+	case <-startedRefresh:
+	case <-time.After(time.Second):
+		t.Fatal("stale desktop detection did not refresh")
+	}
+
+	running, err := DesktopRunning(t.Context())
+	require.NoError(t, err)
+	assert.False(t, running)
 }
 
 func TestNew_UsesDesktopProxyWhenAvailable(t *testing.T) {
@@ -86,9 +130,9 @@ func TestNew_PreservesWrappedDefaultTransport(t *testing.T) {
 		{name: "with Desktop", running: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			SetDesktopRunningForTest(t, func(context.Context) (bool, error) {
+			t.Cleanup(SetDesktopRunningForTest(func(context.Context) (bool, error) {
 				return test.running, nil
-			})
+			}))
 
 			rt := New(t.Context())
 			assert.Same(t, wrapped, rt)

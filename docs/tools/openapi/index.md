@@ -56,7 +56,7 @@ toolsets:
     allow_private_ips: true
 ```
 
-For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+When Docker Desktop is running, eligible public destinations use its PAC proxy before the standard environment proxy policy. A PAC `DIRECT` response connects directly. Set `DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1` (or `true`, `yes`, or `on`) to opt out per request and restore standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` routing; `NO_PROXY` does not bypass Desktop PAC selection. Loopback requests always stay direct. Guarded clients use PAC only when local DNS yields one or more public addresses; only DNS name-not-found may be delegated to PAC. Other lookup errors, empty results, and private or mixed answers remain on the SSRF-protected direct path. See [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
 
 ## Properties
 
