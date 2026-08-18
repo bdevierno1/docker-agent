@@ -34,8 +34,26 @@ type desktopDetectionCache struct {
 	expires    time.Time
 	hasValue   bool
 	refreshing bool
-	ready      chan struct{}
+	ready      *desktopDetectionWaiter
 	err        error
+	// generation discards a refresh that predates a reset. A discarded refresh
+	// changes neither cache state nor err, and closes only its captured waiter.
+	generation uint64
+}
+
+type desktopDetectionWaiter struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newDesktopDetectionWaiter() *desktopDetectionWaiter {
+	return &desktopDetectionWaiter{done: make(chan struct{})}
+}
+
+func (w *desktopDetectionWaiter) close() {
+	if w != nil {
+		w.once.Do(func() { close(w.done) })
+	}
 }
 
 // New returns an HTTP transport that uses the Docker Desktop proxy
@@ -76,7 +94,8 @@ func (c *desktopDetectionCache) running(ctx context.Context) (bool, error) {
 			return value, nil
 		}
 		c.refreshing = true
-		go c.refresh(context.WithoutCancel(ctx))
+		generation := c.generation
+		go c.refresh(context.WithoutCancel(ctx), generation, nil)
 		c.mu.Unlock()
 		return value, nil
 	}
@@ -84,19 +103,24 @@ func (c *desktopDetectionCache) running(ctx context.Context) (bool, error) {
 		ready := c.ready
 		c.mu.Unlock()
 		select {
-		case <-ready:
+		case <-ready.done:
 			return c.running(ctx)
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
 	}
 	c.refreshing = true
-	c.ready = make(chan struct{})
+	c.ready = newDesktopDetectionWaiter()
 	ready := c.ready
+	generation := c.generation
+	go c.refresh(context.WithoutCancel(ctx), generation, ready)
 	c.mu.Unlock()
 
-	c.refresh(context.WithoutCancel(ctx))
-	<-ready
+	select {
+	case <-ready.done:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 	c.mu.Lock()
 	err := c.err
 	c.mu.Unlock()
@@ -106,11 +130,17 @@ func (c *desktopDetectionCache) running(ctx context.Context) (bool, error) {
 	return c.running(ctx)
 }
 
-func (c *desktopDetectionCache) refresh(ctx context.Context) {
+func (c *desktopDetectionCache) refresh(ctx context.Context, generation uint64, ready *desktopDetectionWaiter) {
 	value, err := desktopRunning(ctx)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if generation != c.generation {
+		if ready != nil {
+			ready.close()
+		}
+		return
+	}
 	c.err = err
 	if err == nil {
 		c.value = value
@@ -118,8 +148,8 @@ func (c *desktopDetectionCache) refresh(ctx context.Context) {
 		c.expires = time.Now().Add(time.Minute)
 	}
 	c.refreshing = false
-	if c.ready != nil {
-		close(c.ready)
+	if ready != nil {
+		ready.close()
 		c.ready = nil
 	}
 }
@@ -127,12 +157,17 @@ func (c *desktopDetectionCache) refresh(ctx context.Context) {
 func resetDesktopDetectionForTest() {
 	desktopDetection.mu.Lock()
 	defer desktopDetection.mu.Unlock()
+	ready := desktopDetection.ready
 	desktopDetection.value = false
 	desktopDetection.expires = time.Time{}
 	desktopDetection.hasValue = false
 	desktopDetection.refreshing = false
 	desktopDetection.ready = nil
 	desktopDetection.err = nil
+	desktopDetection.generation++
+	if ready != nil {
+		ready.close()
+	}
 }
 
 // NewDesktopTransport returns a Docker Desktop proxy transport with direct fallback.
@@ -226,7 +261,7 @@ func (f *fallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	slog.Warn("Docker Desktop proxy unavailable, falling back to direct connection",
-		"error", err.Error(), "url", req.URL.String(), "retry_after", proxyRetryCooldown)
+		"error", sanitizeForLog(err.Error()), "url", sanitizeURLForLog(req.URL), "retry_after", proxyRetryCooldown)
 	f.disableProxy()
 	if req.Body != nil && req.GetBody == nil {
 		return nil, err
@@ -240,6 +275,30 @@ func (f *fallbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		retryReq.Body = body
 	}
 	return f.direct.RoundTrip(retryReq)
+}
+
+func sanitizeURLForLog(u *url.URL) string {
+	if u == nil || u.Host == "" {
+		return ""
+	}
+	sanitized := *u
+	sanitized.User = nil
+	sanitized.RawQuery = ""
+	sanitized.ForceQuery = false
+	sanitized.Fragment = ""
+	sanitized.RawFragment = ""
+	// This duplicates pkg/tools/mcp's URL sanitizer because this leaf package
+	// cannot import that higher-level package; log injection also needs C0 removal.
+	return sanitizeForLog(sanitized.String())
+}
+
+func sanitizeForLog(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
 }
 
 func isProxySocketError(err error) bool {
