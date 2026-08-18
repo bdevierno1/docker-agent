@@ -56,6 +56,8 @@ toolsets:
     allow_private_ips: true
 ```
 
+For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+
 ## Properties
 
 | Property            | Type              | Required | Description                                                                                                                                                                                                                                                       |

@@ -105,6 +105,8 @@ toolsets:
 
 For a curated list of public remote MCP endpoints (Linear, GitHub, Vercel, Notion, …) and full OAuth configuration details, see [Remote MCP Servers](../../features/remote-mcp/index.md).
 
+For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+
 ## MCP Prompts
 
 MCP servers can expose **prompts** — named, parameterized templates that the server provides via the `/prompts` endpoint. Docker Agent discovers these at toolset startup and registers them as **slash commands** in the TUI, so you can invoke them directly from the input box.

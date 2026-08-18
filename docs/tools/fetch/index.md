@@ -113,9 +113,11 @@ toolsets:
 
 ### Docker Desktop proxy
 
-When Docker Desktop is running, URL-loaded agent configurations and built-in HTTP toolsets use its PAC proxy for public destinations. Docker Desktop is optional: if it is unavailable, requests retain their normal direct or environment-proxy behavior. Loopback requests always stay direct. Guarded clients use the PAC proxy only when local DNS returns one or more addresses and every address is public. A DNS lookup failure may be delegated to the proxy; any locally resolved non-public address stays on the SSRF-protected direct path.
+When Docker Desktop is running, URL-loaded agent configurations and built-in HTTP toolsets use its PAC proxy for public destinations. Docker Desktop is an optional PAC adapter: without it, standalone Docker Agent continues to use conventional `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` settings. Docker Agent does not evaluate PAC files or PAC URLs directly. Loopback requests always stay direct. Guarded clients use the PAC proxy only when local DNS returns one or more addresses and every address is public. A DNS lookup failure may be delegated to the proxy; any locally resolved non-public address stays on the SSRF-protected direct path.
 
-Set `CAGENT_DISABLE_DESKTOP_PROXY=1` to bypass Docker Desktop's PAC proxy temporarily when diagnosing egress problems. This does not disable SSRF protection; use the tool's documented `allow_private_ips: true` option only for trusted internal services.
+For Docker Desktop proxy configuration, see [Docker Desktop proxy settings](https://docs.docker.com/desktop/settings-and-maintenance/settings/#proxies). Docker's [PAC files](https://docs.docker.com/enterprise/security/hardened-desktop/air-gapped-containers/#proxy-auto-configuration-pac-files) documentation describes the `containersProxy` setting for managed container and image-pull traffic, not Docker Agent's host-proxy adapter path.
+
+Set `DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1` to bypass only Docker Desktop's PAC adapter temporarily when diagnosing egress problems. This does not disable SSRF protection; use the tool's documented `allow_private_ips: true` option only for trusted internal services.
 
 ### SSRF protection and reaching localhost
 

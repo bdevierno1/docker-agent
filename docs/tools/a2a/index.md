@@ -37,6 +37,8 @@ The `Authorization` header shown above authenticates to endpoints served with `d
 | `name`     | string           | ✗        | Tool name registered for the remote agent. Defaults to a name derived from the server's agent card.     |
 | `headers`  | map\[string\]string | ✗     | Extra HTTP headers sent with every request (useful for `Authorization`, tenant selection, tracing, \u2026). |
 
+For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+
 > [!TIP]
 > **See also**
 >

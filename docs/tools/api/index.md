@@ -241,6 +241,8 @@ toolsets:
 >
 > Setting `allow_private_ips: true` re-exposes the SSRF surface for this tool. Only enable it when the configured `endpoint` is a trusted internal service — a prompt-injected agent cannot redirect the call elsewhere because the endpoint is fixed in config, but redirects from the configured host can still reach unexpected places.
 
+For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+
 > [!TIP]
 > **For Complex APIs**
 >

@@ -283,6 +283,14 @@ func (t *compressionTransport) RoundTrip(*http.Request) (*http.Response, error) 
 }
 
 func TestDesktopProxyDisabled(t *testing.T) {
+	t.Setenv(disableDesktopProxyEnv, "")
+	t.Setenv("CAGENT_"+"DISABLE_DESKTOP_PROXY", "")
+	assert.False(t, desktopProxyDisabled())
+
 	t.Setenv(disableDesktopProxyEnv, "1")
-	require.True(t, desktopProxyDisabled())
+	assert.True(t, desktopProxyDisabled())
+
+	t.Setenv(disableDesktopProxyEnv, "")
+	t.Setenv("CAGENT_"+"DISABLE_DESKTOP_PROXY", "1")
+	assert.False(t, desktopProxyDisabled())
 }
