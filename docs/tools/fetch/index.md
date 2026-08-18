@@ -117,6 +117,7 @@ When Docker Desktop is running, URL-loaded agent configurations and built-in HTT
 
 Set `CAGENT_DISABLE_DESKTOP_PROXY=1` to bypass Docker Desktop's PAC proxy temporarily when diagnosing egress problems. This does not disable SSRF protection; use the tool's documented `allow_private_ips: true` option only for trusted internal services.
 
+### SSRF protection and reaching localhost
 
 By default, the fetch tool refuses connections to **non-public IP addresses** — even when DNS for an otherwise-public host resolves to one of them (so DNS rebinding is also blocked). The check happens at dial time, after DNS resolution, and rejects:
 
