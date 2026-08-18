@@ -148,6 +148,33 @@ func TestNew_PreservesWrappedDefaultTransport(t *testing.T) {
 	assert.Equal(t, int32(2), wrapped.calls.Load())
 }
 
+func TestNewWithDirectTransportPreservesHTTPTransportAcrossDesktopAvailability(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		running bool
+	}{
+		{name: "without Desktop", running: false},
+		{name: "with Desktop", running: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			direct := &http.Transport{}
+			t.Cleanup(SetDesktopRunningForTest(func(context.Context) (bool, error) {
+				return test.running, nil
+			}))
+
+			rt := NewWithDirectTransport(t.Context(), direct)
+			if !test.running {
+				assert.Same(t, direct, rt)
+				return
+			}
+
+			fallback, ok := rt.(*fallbackTransport)
+			require.True(t, ok)
+			assert.Same(t, direct, fallback.direct)
+		})
+	}
+}
+
 func TestNew_WorksWithoutDesktopProxy(t *testing.T) {
 	t.Parallel()
 

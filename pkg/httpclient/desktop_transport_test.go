@@ -1,15 +1,20 @@
 package httpclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http/httpproxy"
 
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
@@ -113,13 +118,12 @@ func TestDesktopAwareTransportLoopbackIsNeverProxied(t *testing.T) {
 	assert.False(t, isLoopbackHost("example.com"))
 }
 
-func TestDesktopAwareTransportEnvironmentProxyFallback(t *testing.T) {
-	t.Setenv("HTTP_PROXY", "http://proxy.example:8080")
-	t.Setenv("HTTPS_PROXY", "http://proxy.example:8443")
-	t.Setenv("NO_PROXY", "bypass.example,.internal.example")
-	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return false, nil }))
+func TestDesktopAwareTransportProxyFunc(t *testing.T) {
+	proxy := proxyFunc(&httpproxy.Config{
+		HTTPSProxy: "http://proxy.example:8443",
+		NoProxy:    "bypass.example,.internal.example",
+	})
 
-	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
 	for _, test := range []struct {
 		host      string
 		wantProxy bool
@@ -130,41 +134,50 @@ func TestDesktopAwareTransportEnvironmentProxyFallback(t *testing.T) {
 	} {
 		t.Run(test.host, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+test.host, http.NoBody)
-			proxy, err := transport.direct.Proxy(req)
+			selected, err := proxy(req)
 			require.NoError(t, err)
-			assert.Equal(t, test.wantProxy, proxy != nil)
+			assert.Equal(t, test.wantProxy, selected != nil)
 		})
 	}
 }
 
-func TestDesktopAwareTransportDesktopWinsUntilKillSwitch(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "http://proxy.example:8443")
-	t.Setenv("NO_PROXY", "public.example")
+func TestDesktopAwareTransportDesktopWinsOverNoProxyUntilKillSwitch(t *testing.T) {
+	t.Setenv(disableDesktopProxyEnv, "")
 	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) { return true, nil }))
 
 	transport := newDesktopAwareTransport(true).(*desktopAwareTransport)
 	transport.resolver = func(context.Context, string) ([]net.IP, error) { return []net.IP{net.ParseIP("1.1.1.1")}, nil }
 	desktop := &countingTransport{}
-	direct := &countingTransport{}
-	transport.direct.RegisterProtocol("https", direct)
+	var proxySelections, directDials int
+	transport.direct.Proxy = func(req *http.Request) (*url.URL, error) {
+		proxySelections++
+		return proxyFunc(&httpproxy.Config{HTTPProxy: "http://proxy.example:8080", NoProxy: "bypass.example"})(req)
+	}
+	transport.direct.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		directDials++
+		return nil, errors.New("direct dial")
+	}
 	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper { return desktop }
 
-	resp := roundTrip(t, transport)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://bypass.example", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, 1, desktop.calls)
-	assert.Zero(t, direct.calls)
+	assert.Zero(t, proxySelections)
+	assert.Zero(t, directDials)
 
 	t.Setenv(disableDesktopProxyEnv, "1")
-	resp = roundTrip(t, transport)
-	require.NoError(t, resp.Body.Close())
+	resp, err = transport.RoundTrip(req)
+	if resp != nil {
+		require.NoError(t, resp.Body.Close())
+	}
+	require.EqualError(t, err, "direct dial")
 	assert.Equal(t, 1, desktop.calls)
-	assert.Equal(t, 1, direct.calls)
-
-	t.Setenv(disableDesktopProxyEnv, "")
-	resp = roundTrip(t, transport)
-	require.NoError(t, resp.Body.Close())
-	assert.Equal(t, 2, desktop.calls)
-	assert.Equal(t, 1, direct.calls)
+	assert.Equal(t, 1, proxySelections, "the direct path must apply NO_PROXY")
+	assert.Equal(t, 1, directDials, "NO_PROXY must select a direct connection")
 }
 
 func TestDesktopAwareTransportCachesDesktopTransport(t *testing.T) {
@@ -307,17 +320,49 @@ func TestDesktopAwareTransportDisableCompressionConcurrentDesktopCreation(t *tes
 	assert.True(t, proxy.disabled)
 }
 
-func TestDesktopAwareTransportDisableCompressionBeforeAndAfterDirectFallback(t *testing.T) {
+func TestDesktopAwareTransportDisableCompressionAcrossDirectAndDesktopFlaps(t *testing.T) {
+	desktopRunning := false
+	t.Cleanup(desktoptransport.SetDesktopRunningForTest(func(context.Context) (bool, error) {
+		return desktopRunning, nil
+	}))
+
 	transport := newDesktopAwareTransport(false).(*desktopAwareTransport)
-	proxy := &compressionTransport{}
-	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper { return proxy }
+	direct := &countingTransport{}
+	transport.direct = &http.Transport{}
+	transport.direct.RegisterProtocol("https", direct)
+	desktop := &compressionTransport{}
+	var factoryCalls int
+	transport.newDesktopTransport = func(context.Context, http.RoundTripper) http.RoundTripper {
+		factoryCalls++
+		return desktop
+	}
 
 	transport.DisableCompression()
 	assert.True(t, transport.direct.DisableCompression)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://127.0.0.1", http.NoBody)
-	require.NoError(t, err)
-	assert.True(t, isLoopbackHost(req.URL.Hostname()))
+	resp := roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 1, direct.calls)
+	assert.Zero(t, desktop.calls)
+
+	desktopRunning = true
+	resp = roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 1, factoryCalls)
+	assert.Equal(t, 1, desktop.calls)
+	assert.True(t, desktop.disabled)
+
+	desktopRunning = false
+	resp = roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 2, direct.calls)
+
+	desktopRunning = true
+	resp = roundTrip(t, transport)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, 1, factoryCalls)
+	assert.Equal(t, 2, desktop.calls)
+	assert.True(t, desktop.disabled)
 }
 
 func TestDesktopAwareTransportRetainsDesktopBranchCooldown(t *testing.T) {
@@ -342,11 +387,17 @@ func TestDesktopAwareTransportRetainsDesktopBranchCooldown(t *testing.T) {
 
 func roundTrip(t *testing.T, transport http.RoundTripper) *http.Response {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com", http.NoBody)
-	require.NoError(t, err)
+	req := requestForHost(t, "example.com")
 	resp, err := transport.RoundTrip(req)
 	require.NoError(t, err)
 	return resp
+}
+
+func requestForHost(t *testing.T, host string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+host, http.NoBody)
+	require.NoError(t, err)
+	return req
 }
 
 type countingTransport struct {
@@ -375,6 +426,7 @@ func (t *cooldownTransport) RoundTrip(*http.Request) (*http.Response, error) {
 
 type compressionTransport struct {
 	disabled bool
+	calls    int
 }
 
 func (t *compressionTransport) DisableCompression() {
@@ -382,6 +434,7 @@ func (t *compressionTransport) DisableCompression() {
 }
 
 func (t *compressionTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
 	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
 }
 
@@ -410,4 +463,27 @@ func TestDesktopProxyDisabled(t *testing.T) {
 	t.Setenv(disableDesktopProxyEnv, "")
 	t.Setenv(legacyDisableDesktopProxyEnv, "1")
 	assert.False(t, desktopProxyDisabled())
+}
+
+func TestDesktopProxyDisabledWarnsOncePerInvalidValue(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	resetInvalidDesktopProxySetting()
+
+	t.Setenv(disableDesktopProxyEnv, "unexpected")
+	assert.False(t, desktopProxyDisabled())
+	assert.False(t, desktopProxyDisabled())
+	assert.Equal(t, 1, strings.Count(logs.String(), "unrecognized DOCKER_AGENT_DISABLE_DESKTOP_PROXY value"))
+
+	t.Setenv(disableDesktopProxyEnv, "other")
+	assert.False(t, desktopProxyDisabled())
+	assert.Equal(t, 2, strings.Count(logs.String(), "unrecognized DOCKER_AGENT_DISABLE_DESKTOP_PROXY value"))
+
+	t.Setenv(disableDesktopProxyEnv, "")
+	assert.False(t, desktopProxyDisabled())
+	t.Setenv(disableDesktopProxyEnv, "unexpected")
+	assert.False(t, desktopProxyDisabled())
+	assert.Equal(t, 3, strings.Count(logs.String(), "unrecognized DOCKER_AGENT_DISABLE_DESKTOP_PROXY value"))
 }

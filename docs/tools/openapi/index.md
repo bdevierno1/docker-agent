@@ -47,7 +47,7 @@ toolsets:
 
 ### Reaching internal services
 
-By default the OpenAPI tool refuses connections to non-public IP addresses, blocking SSRF attempts even when DNS resolves an otherwise-public host to an internal range. Opt in with `allow_private_ips` when the spec or its `servers` entries legitimately target localhost or your internal network:
+By default, the OpenAPI tool's **direct path** refuses connections to non-public IP addresses, including a public hostname that resolves to an internal address. The dial-time guard applies when Docker Desktop is unavailable or bypassed, and when its PAC response is `DIRECT`; it does not validate destinations selected by Docker Desktop's PAC proxy. Opt in with `allow_private_ips` when the spec or its `servers` entries legitimately target localhost or your internal network:
 
 ```yaml
 toolsets:
@@ -56,7 +56,7 @@ toolsets:
     allow_private_ips: true
 ```
 
-When Docker Desktop is running, eligible public destinations use its PAC proxy before the standard environment proxy policy. A PAC `DIRECT` response connects directly. Set `DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1` (or `true`, `yes`, or `on`) to opt out per request and restore standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` routing; `NO_PROXY` does not bypass Desktop PAC selection. Loopback requests always stay direct. Guarded clients use PAC only when local DNS yields one or more public addresses; only DNS name-not-found may be delegated to PAC. Other lookup errors, empty results, and private or mixed answers remain on the SSRF-protected direct path. See [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+When Docker Desktop is running, eligible public destinations use its PAC proxy before standard environment-proxy routing. A PAC `DIRECT` response uses a direct connection. `NO_PROXY` does not bypass Desktop PAC selection; set `DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1` (or `true`, `yes`, or `on`) to bypass only the Desktop adapter per request and restore standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` routing. Loopback always stays direct. For guarded requests, dial-time SSRF protection remains on the direct path, including PAC `DIRECT`: it rejects non-public resolved addresses and DNS-rebinding results. PAC is considered only after local DNS returns public addresses, except that a DNS name-not-found result may be delegated to PAC; empty results, other lookup errors, and private or mixed answers stay on the SSRF-protected direct path. `allow_private_ips: true` removes that direct-path guard for trusted internal services, but Desktop PAC still takes precedence for eligible non-loopback destinations. See [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
 
 ## Properties
 

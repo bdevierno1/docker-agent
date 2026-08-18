@@ -53,7 +53,7 @@ Each agent entry in the `GET /api/agents` response contains:
 
 ### Remote agent sources
 
-For an agent loaded from a remote HTTP(S) configuration source, endpoints that need to load that source return `502 Bad Gateway` when the remote fetch is unavailable. Invalid source URLs and invalid configuration remain server errors (`500`).
+For an agent loaded from a remote HTTP(S) configuration source, endpoints that need to load that source return `502 Bad Gateway` when fetching it fails. A missing configured agent returns `404 Not Found`; invalid source URLs or configuration return `500 Internal Server Error`.
 
 ### Sessions
 

@@ -19,6 +19,12 @@ import (
 
 const disableDesktopProxyEnv = "DOCKER_AGENT_DISABLE_DESKTOP_PROXY"
 
+var invalidDesktopProxySetting struct {
+	sync.Mutex
+
+	value string
+}
+
 type desktopAwareTransport struct {
 	direct              *http.Transport
 	guarded             bool
@@ -71,11 +77,15 @@ func cloneDefaultTransport(proxy func(*http.Request) (*url.URL, error)) *http.Tr
 	return &http.Transport{Proxy: proxy}
 }
 
-func environmentProxyFunc() func(*http.Request) (*url.URL, error) {
-	proxyForURL := httpproxy.FromEnvironment().ProxyFunc()
+func proxyFunc(config *httpproxy.Config) func(*http.Request) (*url.URL, error) {
+	proxyForURL := config.ProxyFunc()
 	return func(req *http.Request) (*url.URL, error) {
 		return proxyForURL(req.URL)
 	}
+}
+
+func environmentProxyFunc() func(*http.Request) (*url.URL, error) {
+	return proxyFunc(httpproxy.FromEnvironment())
 }
 
 func (t *desktopAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -130,13 +140,31 @@ func desktopProxyDisabled() bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(disableDesktopProxyEnv)))
 	switch value {
 	case "", "0", "false", "no", "off":
+		resetInvalidDesktopProxySetting()
 		return false
 	case "1", "true", "yes", "on":
+		resetInvalidDesktopProxySetting()
 		return true
 	default:
-		slog.Warn("unrecognized DOCKER_AGENT_DISABLE_DESKTOP_PROXY value; treating it as disabled", "value", value)
+		warnInvalidDesktopProxySetting(value)
 		return false
 	}
+}
+
+func resetInvalidDesktopProxySetting() {
+	invalidDesktopProxySetting.Lock()
+	defer invalidDesktopProxySetting.Unlock()
+	invalidDesktopProxySetting.value = ""
+}
+
+func warnInvalidDesktopProxySetting(value string) {
+	invalidDesktopProxySetting.Lock()
+	defer invalidDesktopProxySetting.Unlock()
+	if invalidDesktopProxySetting.value == value {
+		return
+	}
+	invalidDesktopProxySetting.value = value
+	slog.Warn("unrecognized DOCKER_AGENT_DISABLE_DESKTOP_PROXY value; treating it as disabled", "value", value)
 }
 
 func isLoopbackHost(host string) bool {
