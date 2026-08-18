@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,39 @@ func TestNew_UsesDesktopProxyWhenAvailable(t *testing.T) {
 		_, ok := rt.(*http.Transport)
 		assert.True(t, ok, "transport should be *http.Transport when Docker Desktop is not running")
 	}
+}
+
+func TestNew_PreservesWrappedDefaultTransport(t *testing.T) {
+	// Intentionally not parallel: mutates the http.DefaultTransport global.
+	previous := http.DefaultTransport
+	wrapped := &countingRoundTripper{}
+	http.DefaultTransport = wrapped
+	t.Cleanup(func() { http.DefaultTransport = previous })
+
+	for _, test := range []struct {
+		name    string
+		running bool
+	}{
+		{name: "without Desktop", running: false},
+		{name: "with Desktop", running: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			SetDesktopRunningForTest(t, func(context.Context) (bool, error) {
+				return test.running, nil
+			})
+
+			rt := New(t.Context())
+			assert.Same(t, wrapped, rt)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com/", http.NoBody)
+			require.NoError(t, err)
+			resp, err := (&http.Client{Transport: rt}).Do(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+		})
+	}
+
+	assert.Equal(t, int32(2), wrapped.calls.Load())
 }
 
 func TestNew_WorksWithoutDesktopProxy(t *testing.T) {

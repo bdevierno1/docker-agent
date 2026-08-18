@@ -37,12 +37,13 @@ func New(ctx context.Context) http.RoundTripper {
 }
 
 // NewWithDirectTransport is like New but uses direct as its direct fallback.
-// A nil direct clones http.DefaultTransport.
+// A nil direct uses http.DefaultTransport.
 func NewWithDirectTransport(ctx context.Context, direct http.RoundTripper) http.RoundTripper {
+	transport := directTransport(direct)
 	if running, err := DesktopRunning(ctx); err == nil && running {
-		return NewDesktopTransport(direct)
+		return NewDesktopTransport(transport)
 	}
-	return directTransport(direct)
+	return transport
 }
 
 // DesktopRunning reports the memoized Docker Desktop availability state.
@@ -56,9 +57,13 @@ func DesktopRunning(ctx context.Context) (bool, error) {
 }
 
 // NewDesktopTransport returns a Docker Desktop proxy transport with direct fallback.
-// A nil direct clones http.DefaultTransport.
+// A nil direct uses http.DefaultTransport.
 func NewDesktopTransport(direct http.RoundTripper) http.RoundTripper {
-	transport := directTransport(direct)
+	baseTransport := directTransport(direct)
+	transport, ok := baseTransport.(*http.Transport)
+	if !ok {
+		return baseTransport
+	}
 	proxyTransport := transport.Clone()
 	proxyTransport.Proxy = http.ProxyURL(&url.URL{
 		Scheme: "http",
@@ -69,14 +74,14 @@ func NewDesktopTransport(direct http.RoundTripper) http.RoundTripper {
 	return newFallbackTransport(proxyTransport, transport)
 }
 
-func directTransport(direct http.RoundTripper) *http.Transport {
-	if transport, ok := direct.(*http.Transport); ok {
-		return transport
+func directTransport(direct http.RoundTripper) http.RoundTripper {
+	if direct != nil {
+		return direct
 	}
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
 		return transport.Clone()
 	}
-	return &http.Transport{Proxy: http.ProxyFromEnvironment}
+	return http.DefaultTransport
 }
 
 // SetDesktopRunningForTest replaces Docker Desktop detection until cleanup.
