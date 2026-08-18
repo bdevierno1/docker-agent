@@ -105,7 +105,7 @@ toolsets:
 
 For a curated list of public remote MCP endpoints (Linear, GitHub, Vercel, Notion, …) and full OAuth configuration details, see [Remote MCP Servers](../../features/remote-mcp/index.md).
 
-For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
+For proxy behavior, standalone Docker Agent uses `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; it does not evaluate PAC files or PAC URLs directly. Docker Desktop is an optional PAC adapter for MCP OAuth discovery, token, and helper requests, but not the remote MCP Streamable HTTP/SSE transport—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
 
 ## MCP Prompts
 

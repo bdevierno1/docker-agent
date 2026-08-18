@@ -12,6 +12,9 @@ import (
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
 
+// legacyDisableDesktopProxyEnv is the retired name that must remain inert.
+const legacyDisableDesktopProxyEnv = "CAGENT_DISABLE_DESKTOP_PROXY"
+
 func TestDesktopAwareTransportProxySafe(t *testing.T) {
 	t.Parallel()
 
@@ -284,13 +287,13 @@ func (t *compressionTransport) RoundTrip(*http.Request) (*http.Response, error) 
 
 func TestDesktopProxyDisabled(t *testing.T) {
 	t.Setenv(disableDesktopProxyEnv, "")
-	t.Setenv("CAGENT_"+"DISABLE_DESKTOP_PROXY", "")
+	t.Setenv(legacyDisableDesktopProxyEnv, "")
 	assert.False(t, desktopProxyDisabled())
 
 	t.Setenv(disableDesktopProxyEnv, "1")
 	assert.True(t, desktopProxyDisabled())
 
 	t.Setenv(disableDesktopProxyEnv, "")
-	t.Setenv("CAGENT_"+"DISABLE_DESKTOP_PROXY", "1")
+	t.Setenv(legacyDisableDesktopProxyEnv, "1")
 	assert.False(t, desktopProxyDisabled())
 }
