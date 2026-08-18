@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"testing"
@@ -62,6 +63,22 @@ func TestDesktopAwareTransportProxySafe(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "temporary DNS error stays direct",
+			host: "temporary.example",
+			resolver: func(context.Context, string) ([]net.IP, error) {
+				return nil, &net.DNSError{IsTemporary: true}
+			},
+			want: false,
+		},
+		{
+			name: "non-DNS resolver error stays direct",
+			host: "failed.example",
+			resolver: func(context.Context, string) ([]net.IP, error) {
+				return nil, errors.New("resolver failed")
+			},
+			want: false,
+		},
+		{
 			name: "unresolvable host delegates to proxy",
 			host: "proxy-only.example",
 			resolver: func(context.Context, string) ([]net.IP, error) {
@@ -87,6 +104,9 @@ func TestDesktopAwareTransportLoopbackIsNeverProxied(t *testing.T) {
 	t.Parallel()
 
 	assert.True(t, isLoopbackHost("localhost"))
+	assert.True(t, isLoopbackHost("localhost."))
+	assert.True(t, isLoopbackHost("LOCALHOST"))
+	assert.True(t, isLoopbackHost("service.localhost"))
 	assert.True(t, isLoopbackHost("127.0.0.1"))
 	assert.True(t, isLoopbackHost("::1"))
 	assert.False(t, isLoopbackHost("example.com"))
@@ -292,12 +312,26 @@ func (t *compressionTransport) RoundTrip(*http.Request) (*http.Response, error) 
 }
 
 func TestDesktopProxyDisabled(t *testing.T) {
-	t.Setenv(disableDesktopProxyEnv, "")
-	t.Setenv(legacyDisableDesktopProxyEnv, "")
-	assert.False(t, desktopProxyDisabled())
-
-	t.Setenv(disableDesktopProxyEnv, "1")
-	assert.True(t, desktopProxyDisabled())
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"anything", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{" yes ", true},
+		{"On", true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv(disableDesktopProxyEnv, tc.value)
+			t.Setenv(legacyDisableDesktopProxyEnv, "")
+			assert.Equal(t, tc.want, desktopProxyDisabled())
+		})
+	}
 
 	t.Setenv(disableDesktopProxyEnv, "")
 	t.Setenv(legacyDisableDesktopProxyEnv, "1")

@@ -1594,6 +1594,16 @@ func (sm *SessionManager) applyAuthorSafetyDefault(ctx context.Context, sess *se
 	}
 }
 
+func (sm *SessionManager) sourceLoadError(agentFilename string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, config.ErrSourceFetchFailed) {
+		return fmt.Errorf("%w: load %q: %w", ErrAgentSourceUnavailable, agentFilename, err)
+	}
+	return fmt.Errorf("load %q: %w", agentFilename, err)
+}
+
 func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*team.Team, error) {
 	agentSource, err := sm.resolveSource(agentFilename)
 	if err != nil {
@@ -1602,7 +1612,7 @@ func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, ru
 
 	t, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	if err != nil {
-		return nil, fmt.Errorf("%w: load %q: %w", ErrAgentSourceUnavailable, agentFilename, err)
+		return nil, sm.sourceLoadError(agentFilename, err)
 	}
 	return t, nil
 }
@@ -1618,7 +1628,7 @@ func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename 
 	allOpts := append(loaderdefaults.Opts(), opts...)
 	result, err := teamloader.LoadWithConfig(ctx, agentSource, runConfig, allOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("%w: load %q: %w", ErrAgentSourceUnavailable, agentFilename, err)
+		return nil, sm.sourceLoadError(agentFilename, err)
 	}
 	return result, nil
 }
@@ -1633,7 +1643,7 @@ func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename str
 
 	cfg, err := config.Load(ctx, agentSource)
 	if err != nil {
-		return nil, fmt.Errorf("%w: load %q: %w", ErrAgentSourceUnavailable, agentFilename, err)
+		return nil, sm.sourceLoadError(agentFilename, err)
 	}
 	return cfg, nil
 }

@@ -252,7 +252,7 @@ func agentSourceHTTPError(operation string, err error) error {
 	case errors.Is(err, ErrAgentSourceUnavailable):
 		return echo.NewHTTPError(http.StatusBadGateway, fmt.Sprintf("%s: %v", operation, err))
 	default:
-		return nil
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("%s: %v", operation, err))
 	}
 }
 
@@ -292,10 +292,7 @@ func (s *Server) createSession(c echo.Context) error {
 		if errors.Is(err, ErrInvalidWorkingDir) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		if sourceErr := agentSourceHTTPError("failed to create session", err); sourceErr != nil {
-			return sourceErr
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to create session: %v", err))
+		return agentSourceHTTPError("failed to create session", err)
 	}
 
 	return c.JSON(http.StatusOK, sess)
@@ -433,10 +430,7 @@ func (s *Server) updateSessionSafetyPolicy(c echo.Context) error {
 func (s *Server) getAgentToolCount(c echo.Context) error {
 	count, err := s.sm.GetAgentToolCount(c.Request().Context(), c.Param("id"), c.Param("agent_name"))
 	if err != nil {
-		if sourceErr := agentSourceHTTPError("failed to get agent tool count", err); sourceErr != nil {
-			return sourceErr
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to get agent tool count: %v", err))
+		return agentSourceHTTPError("failed to get agent tool count", err)
 	}
 
 	return c.JSON(http.StatusOK, map[string]int{"available_tools": count})
@@ -524,10 +518,7 @@ func (s *Server) runAgent(c echo.Context) error {
 		if errors.Is(err, ErrModelSwitchingNotSupported) {
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 		}
-		if sourceErr := agentSourceHTTPError("failed to run session", err); sourceErr != nil {
-			return sourceErr
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to run session: %v", err))
+		return agentSourceHTTPError("failed to run session", err)
 	}
 
 	c.Response().Header().Set("Content-Type", "text/event-stream")

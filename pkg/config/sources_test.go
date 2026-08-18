@@ -301,6 +301,7 @@ func TestURLSource_Read_HTTPError(t *testing.T) {
 
 			_, err := newURLSourceForTest(server.URL, nil).Read(t.Context())
 			require.Error(t, err)
+			require.ErrorIs(t, err, ErrSourceFetchFailed)
 		})
 	}
 }
@@ -310,6 +311,7 @@ func TestURLSource_Read_ConnectionError(t *testing.T) {
 
 	_, err := newURLSourceForTest("http://invalid.invalid/config.yaml", nil).Read(t.Context())
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceFetchFailed)
 }
 
 func TestURLSource_Read_CachesContent(t *testing.T) {

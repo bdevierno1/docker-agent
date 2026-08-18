@@ -96,10 +96,10 @@ func SetBrowserOpenerForTesting(opener BrowserOpener) (restore func()) {
 // configurations that explicitly opt in to talking to a server on a private
 // network).
 func HTTPClientForAllowPrivateIPs(allowPrivateIPs bool) *http.Client {
-	if allowPrivateIPs {
-		return httpclient.NewAllowPrivateIPsClient(30 * time.Second)
+	if !allowPrivateIPs {
+		return DefaultHTTPClient()
 	}
-	return DefaultHTTPClient()
+	return httpclient.ClientForAllowPrivateIPs(30*time.Second, true)
 }
 
 // GenerateState generates a random state parameter for OAuth CSRF protection

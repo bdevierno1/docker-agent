@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +22,20 @@ func TestNewAllowPrivateIPsClientReachesLoopback(t *testing.T) {
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusNoContent, response.StatusCode)
+}
+
+func TestClientForAllowPrivateIPsSharesPolicyTransport(t *testing.T) {
+	safeFirst := ClientForAllowPrivateIPs(time.Second, false)
+	safeSecond := ClientForAllowPrivateIPs(2*time.Second, false)
+	privateClient := ClientForAllowPrivateIPs(3*time.Second, true)
+
+	require.NotSame(t, safeFirst, safeSecond)
+	assert.Equal(t, time.Second, safeFirst.Timeout)
+	assert.Equal(t, 2*time.Second, safeSecond.Timeout)
+	assert.Same(t, safeFirst.Transport, safeSecond.Transport)
+	assert.Same(t, safeFirst.Transport, TransportForAllowPrivateIPs(false))
+	assert.Same(t, privateClient.Transport, TransportForAllowPrivateIPs(true))
+	assert.NotSame(t, safeFirst.Transport, privateClient.Transport)
 }
 
 func TestNewSafeClientRejectsLoopback(t *testing.T) {

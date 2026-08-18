@@ -185,10 +185,7 @@ func (t *Toolset) Start(ctx context.Context) error {
 	// addresses (cloud metadata at 169.254.169.254 in particular). The
 	// `allow_private_ips: true` opt-in disables this for legitimate
 	// internal-service use.
-	client := httpclient.NewSafeClient(t.timeout, false)
-	if t.allowPrivateIPs {
-		client = httpclient.NewAllowPrivateIPsClient(t.timeout)
-	}
+	client := httpclient.ClientForAllowPrivateIPs(t.timeout, t.allowPrivateIPs)
 	resolver := agentcard.NewResolver(client)
 	card, err := resolver.Resolve(ctx, t.url)
 	if err != nil {

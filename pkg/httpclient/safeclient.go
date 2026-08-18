@@ -13,17 +13,37 @@ import (
 // this value uniformly affects every HTTP-based built-in tool.
 const DefaultToolHTTPTimeout = 30 * time.Second
 
+var (
+	safeTransport            = NewDesktopAwareSSRFSafeTransport()
+	allowPrivateIPsTransport = newAllowPrivateIPsTransport()
+)
+
+// TransportForAllowPrivateIPs returns the shared transport for the requested
+// outbound address policy.
+func TransportForAllowPrivateIPs(allowPrivateIPs bool) http.RoundTripper {
+	if allowPrivateIPs {
+		return allowPrivateIPsTransport
+	}
+	return safeTransport
+}
+
+// ClientForAllowPrivateIPs returns a client with an independent timeout and
+// shared transport for the requested outbound address policy.
+func ClientForAllowPrivateIPs(timeout time.Duration, allowPrivateIPs bool) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		Transport:     TransportForAllowPrivateIPs(allowPrivateIPs),
+		CheckRedirect: BoundedRedirects(10),
+	}
+}
+
 // NewAllowPrivateIPsClient returns an HTTP client for explicit
 // allow_private_ips opt-ins. It can reach private addresses directly, but uses
 // Docker Desktop's PAC proxy when available; loopback is always direct. Docker
 // Desktop remains optional and DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1 restores the
 // default environment-proxy/direct behavior.
 func NewAllowPrivateIPsClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout:       timeout,
-		Transport:     newAllowPrivateIPsTransport(),
-		CheckRedirect: BoundedRedirects(10),
-	}
+	return ClientForAllowPrivateIPs(timeout, true)
 }
 
 // NewSafeClient returns the HTTP client used by built-in tools that issue
@@ -40,9 +60,5 @@ func NewSafeClient(timeout time.Duration, unsafe bool) *http.Client {
 	if unsafe {
 		return &http.Client{Timeout: timeout}
 	}
-	return &http.Client{
-		Timeout:       timeout,
-		Transport:     NewDesktopAwareSSRFSafeTransport(),
-		CheckRedirect: BoundedRedirects(10),
-	}
+	return ClientForAllowPrivateIPs(timeout, false)
 }
