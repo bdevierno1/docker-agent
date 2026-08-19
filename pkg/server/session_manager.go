@@ -48,7 +48,13 @@ type SessionManager struct {
 	deletedSessions *concurrent.Map[string, *activeRuntimes]
 	eventLogs       *concurrent.Map[string, *pumpedEventLog]
 	sessionStore    session.Store
-	Sources         config.Sources
+	// Sources maps an agent name to where its definition is read from.
+	//
+	// It is written at startup and, since agent definitions can now be pushed
+	// over the API, while runs are in flight. sourcesMu guards it; read it
+	// through sourcesSnapshot or resolveSource rather than directly.
+	Sources   config.Sources
+	sourcesMu sync.RWMutex
 
 	runConfig *config.RuntimeConfig
 
@@ -1623,6 +1629,9 @@ func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename 
 // the same stable identity, resolving would be a guess, so it returns the
 // not-found error instead of silently picking one.
 func (sm *SessionManager) resolveSource(agentFilename string) (config.Source, error) {
+	sm.sourcesMu.RLock()
+	defer sm.sourcesMu.RUnlock()
+
 	if agentSource, found := sm.Sources[agentFilename]; found {
 		return agentSource, nil
 	}
@@ -2191,4 +2200,45 @@ func (sm *SessionManager) ExportSessionForRecovery(ctx context.Context, sessionI
 		export["errors"] = errs
 	}
 	return export, nil
+}
+
+// SetSource installs or replaces an agent definition at runtime.
+//
+// A hosted deployment holds agent definitions outside the runtime, so the set
+// of agents changes without the process restarting. Sources is otherwise only
+// written at startup, hence the lock.
+//
+// Sessions already running keep the definition they loaded: a team is built
+// once per session, so replacing a definition never alters a conversation that
+// is already under way. The next session picks up the new one.
+func (sm *SessionManager) SetSource(name string, source config.Source) {
+	sm.sourcesMu.Lock()
+	defer sm.sourcesMu.Unlock()
+	if sm.Sources == nil {
+		sm.Sources = config.Sources{}
+	}
+	sm.Sources[name] = source
+}
+
+// RemoveSource drops an agent definition. Returns false when it was not known.
+func (sm *SessionManager) RemoveSource(name string) bool {
+	sm.sourcesMu.Lock()
+	defer sm.sourcesMu.Unlock()
+	if _, ok := sm.Sources[name]; !ok {
+		return false
+	}
+	delete(sm.Sources, name)
+	return true
+}
+
+// SourcesSnapshot returns a copy safe to range over while sources are being
+// written.
+func (sm *SessionManager) SourcesSnapshot() config.Sources {
+	sm.sourcesMu.RLock()
+	defer sm.sourcesMu.RUnlock()
+	out := make(config.Sources, len(sm.Sources))
+	for k, v := range sm.Sources {
+		out[k] = v
+	}
+	return out
 }
