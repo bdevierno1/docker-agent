@@ -572,3 +572,42 @@ func (s mockStore) GetSessions(context.Context) ([]*session.Session, error) {
 func (s mockStore) GetSessionSummaries(context.Context) ([]session.Summary, error) {
 	return nil, nil
 }
+
+func TestPutAgentSourceInstallsWithoutRestart(t *testing.T) {
+	// A hosted deployment holds agent definitions outside the runtime, so the
+	// set of agents has to change without dropping every session on the
+	// instance. Sources is otherwise fixed at startup.
+	sm := &SessionManager{Sources: config.Sources{}}
+
+	sm.SetSource("recon", config.NewBytesSource("recon", []byte("agents: {}")))
+	if _, err := sm.resolveSource("recon"); err != nil {
+		t.Fatalf("a pushed definition should resolve, got %v", err)
+	}
+
+	if !sm.RemoveSource("recon") {
+		t.Fatal("removing a known agent should report success")
+	}
+	if _, err := sm.resolveSource("recon"); err == nil {
+		t.Fatal("a removed agent should no longer resolve")
+	}
+	if sm.RemoveSource("never-existed") {
+		t.Fatal("removing an unknown agent should report failure")
+	}
+}
+
+func TestSourcesSnapshotIsACopy(t *testing.T) {
+	// Listing ranges over sources while they may be written, so callers get a
+	// copy rather than the live map.
+	sm := &SessionManager{Sources: config.Sources{}}
+	sm.SetSource("a", config.NewBytesSource("a", []byte("agents: {}")))
+
+	snap := sm.SourcesSnapshot()
+	sm.SetSource("b", config.NewBytesSource("b", []byte("agents: {}")))
+
+	if len(snap) != 1 {
+		t.Fatalf("snapshot should not observe later writes, got %d entries", len(snap))
+	}
+	if len(sm.SourcesSnapshot()) != 2 {
+		t.Fatal("a fresh snapshot should include both")
+	}
+}

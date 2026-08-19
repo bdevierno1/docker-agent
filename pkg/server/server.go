@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -28,6 +29,8 @@ import (
 	"github.com/docker/docker-agent/pkg/echolog"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
@@ -131,6 +134,8 @@ func (s *Server) registerRoutes() {
 	group.POST("/sessions/batch/export", s.batchExportSessions)
 
 	group.GET("/agents/:id/:agent_name/tools/count", s.getAgentToolCount)
+	group.PUT("/agents/:id", s.putAgentSource)
+	group.DELETE("/agents/:id", s.deleteAgentSource)
 
 	group.POST("/mcp-oauth/callback", s.mcpOAuthCallback)
 
@@ -185,7 +190,7 @@ func (s *Server) sessionsReady(c echo.Context) error {
 
 func (s *Server) getAgents(c echo.Context) error {
 	agents := []api.Agent{}
-	for k, agentSource := range s.sm.Sources {
+	for k, agentSource := range s.sm.SourcesSnapshot() {
 		slog.Debug("API source", "source", agentSource.Name())
 
 		cfg, err := config.Load(c.Request().Context(), agentSource)
@@ -239,7 +244,7 @@ func agentsAPIEntry(name string, cfg *latest.Config) (api.Agent, bool) {
 func (s *Server) getAgentConfig(c echo.Context) error {
 	agentID := c.Param("id")
 
-	for k, agentSource := range s.sm.Sources {
+	for k, agentSource := range s.sm.SourcesSnapshot() {
 		if k != agentID {
 			continue
 		}
@@ -1088,3 +1093,52 @@ func BearerTokenMiddleware(expectedToken string) echo.MiddlewareFunc {
 		}
 	}
 }
+
+// putAgentSource installs or replaces an agent definition without restarting.
+//
+// Agent definitions otherwise come from files resolved at startup, which means
+// a hosted deployment holding them elsewhere has to restart the process to
+// change the set of agents — dropping every session and paused tool call on
+// that instance. Accepting a definition over the API removes that.
+//
+// The body is the agent YAML. The name is the path parameter, matching how
+// agents are addressed everywhere else in this API.
+func (s *Server) putAgentSource(c echo.Context) error {
+	name := c.Param("id")
+	if name == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "agent name is required")
+	}
+
+	body, err := io.ReadAll(io.LimitReader(c.Request().Body, maxAgentSourceBytes))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("failed to read body: %v", err))
+	}
+	if len(body) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "agent definition is empty")
+	}
+
+	// Parse before installing. A definition that cannot be loaded would
+	// otherwise be accepted here and fail later, on somebody's first run.
+	source := config.NewBytesSource(name, body)
+	if _, err := teamloader.Load(c.Request().Context(), source, s.sm.runConfig, loaderdefaults.Opts()...); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid agent definition: %v", err))
+	}
+
+	s.sm.SetSource(name, source)
+	slog.InfoContext(c.Request().Context(), "Agent definition installed", "agent", name, "bytes", len(body))
+	return c.JSON(http.StatusOK, map[string]string{"name": name, "status": "installed"})
+}
+
+// deleteAgentSource removes an agent definition. Sessions already running with
+// it are unaffected; they hold the team they loaded.
+func (s *Server) deleteAgentSource(c echo.Context) error {
+	name := c.Param("id")
+	if !s.sm.RemoveSource(name) {
+		return echo.NewHTTPError(http.StatusNotFound, "agent not found: "+name)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+// maxAgentSourceBytes bounds a pushed definition. Agent YAML is small; this is
+// large enough for a long instruction block and small enough to reject junk.
+const maxAgentSourceBytes = 1 << 20
